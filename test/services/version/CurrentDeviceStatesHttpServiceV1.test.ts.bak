@@ -1,0 +1,172 @@
+let _ = require('lodash');
+let async = require('async');
+let restify = require('restify');
+let assert = require('chai').assert;
+
+import { ConfigParams } from 'pip-services3-commons-node';
+import { Descriptor } from 'pip-services3-commons-node';
+import { References } from 'pip-services3-commons-node';
+
+import { DevicesMemoryClientV1 } from 'iqs-clients-devices-node';
+
+import { CurrentDeviceStateV1 } from '../../../src/data/version1/CurrentDeviceStateV1';
+import { StateUpdateV1 } from '../../../src/data/version1/StateUpdateV1';
+import { CurrentDeviceStatesMemoryPersistence } from '../../../src/persistence/CurrentDeviceStatesMemoryPersistence';
+import { CurrentDeviceStatesController } from '../../../src/logic/CurrentDeviceStatesController';
+import { CurrentDeviceStatesHttpServiceV1 } from '../../../src/services/version1/CurrentDeviceStatesHttpServiceV1';
+
+let httpConfig = ConfigParams.fromTuples(
+    "connection.protocol", "http",
+    "connection.host", "localhost",
+    "connection.port", 3000
+);
+
+let STATE1: StateUpdateV1 = {
+    org_id: '1',
+    device_id: '1',
+    time: new Date(),
+    lat: 32,
+    long: -110,
+    alt: 750,
+    angle: 0,
+    speed: 1,
+    immobile: false
+};
+let STATE2: StateUpdateV1 = {
+    org_id: '1',
+    device_id: '2',
+    time: new Date(),
+    lat: 33,
+    long: -111,
+    alt: 750,
+    angle: 0,
+    speed: 1,
+    immobile: false
+};
+
+suite('CurrentDeviceStatesHttpServiceV1', ()=> {    
+    let service: CurrentDeviceStatesHttpServiceV1;
+    let rest: any;
+
+    suiteSetup((done) => {
+        let persistence = new CurrentDeviceStatesMemoryPersistence();
+        let controller = new CurrentDeviceStatesController();
+
+        let devicesClient = new DevicesMemoryClientV1();
+        devicesClient.createDevice(null, { id: '1', org_id: '1', udi: '111', model: 'smartphone', active: true }, () => {});
+        devicesClient.createDevice(null, { id: '2', org_id: '1', udi: '222', model: 'smartphone', active: true }, () => {});
+
+        service = new CurrentDeviceStatesHttpServiceV1();
+        service.configure(httpConfig);
+
+        let references: References = References.fromTuples(
+            new Descriptor('iqs-services-devices', 'client', 'memory', 'default', '1.0'), devicesClient,
+            new Descriptor('iqs-services-currdevicestates', 'persistence', 'memory', 'default', '1.0'), persistence,
+            new Descriptor('iqs-services-currdevicestates', 'controller', 'default', 'default', '1.0'), controller,
+            new Descriptor('iqs-services-currdevicestates', 'service', 'http', 'default', '1.0'), service
+        );
+        controller.setReferences(references);
+        service.setReferences(references);
+
+        service.open(null, done);
+    });
+    
+    suiteTeardown((done) => {
+        service.close(null, done);
+    });
+
+    setup(() => {
+        let url = 'http://localhost:3000';
+        rest = restify.createJsonClient({ url: url, version: '*' });
+    });
+    
+    
+    test('CRUD Operations', (done) => {
+        let state1, state2;
+
+        async.series([
+        // Create one state
+            (callback) => {
+                rest.post('/v1/curr_device_states/update_state',
+                    {
+                        state_update: STATE1
+                    },
+                    (err, req, res, state) => {
+                        assert.isNull(err);
+
+                        assert.isObject(state);
+                        assert.equal(state.org_id, STATE1.org_id);
+                        assert.equal(state.online, 1);
+                        assert.equal(state.immobile, 0);
+
+                        state1 = state;
+
+                        callback();
+                    }
+                );
+            },
+        // Create another state
+            (callback) => {
+                rest.post('/v1/curr_device_states/update_state', 
+                    {
+                        state_update: STATE2
+                    },
+                    (err, req, res, state) => {
+                        assert.isNull(err);
+
+                        assert.isObject(state);
+                        assert.equal(state.org_id, STATE2.org_id);
+                        assert.equal(state.online, 1);
+                        assert.equal(state.immobile, 0);
+
+                        state2 = state;
+
+                        callback();
+                    }
+                );
+            },
+        // Get all states
+            (callback) => {
+                rest.post('/v1/curr_device_states/get_states',
+                    {},
+                    (err, req, res, page) => {
+                        assert.isNull(err);
+
+                        assert.isObject(page);
+                        assert.lengthOf(page.data, 2);
+
+                        callback();
+                    }
+                );
+            },
+        // Update the state
+            (callback) => {
+                let stateUpdate = <StateUpdateV1>{
+                    org_id: '1',
+                    device_id: '1',
+                    time: new Date(STATE1.time.getTime() + 10000),
+                    immobile: true
+                };
+
+                rest.post('/v1/curr_device_states/update_state',
+                    { 
+                        state_update: stateUpdate
+                    },
+                    (err, req, res, state) => {
+                        assert.isNull(err);
+
+                        assert.isObject(state);
+                        assert.equal(state.org_id, stateUpdate.org_id);
+                        assert.isNull(state.pos);
+                        assert.equal(11, state.online);
+                        assert.equal(1, state.immobile);
+
+                        state1 = state;
+
+                        callback();
+                    }
+                );
+            }
+        ], done);
+    });
+});
